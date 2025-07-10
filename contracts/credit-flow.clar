@@ -196,3 +196,107 @@
     (/ (* amount collateral-ratio) u100)
   )
 )
+
+;; Calculate merit-based interest rates
+;; Reward trustworthy borrowers with preferential rates
+(define-private (calculate-interest-rate (score uint))
+  (let ((base-rate u10))
+    (- base-rate (/ (* score u5) u100))
+  )
+)
+
+;; Calculate total loan obligation with interest
+(define-private (calculate-total-due (loan {
+  borrower: principal,
+  amount: uint,
+  collateral: uint,
+  due-height: uint,
+  interest-rate: uint,
+  is-active: bool,
+  is-defaulted: bool,
+  repaid-amount: uint,
+}))
+  (let ((interest (* (get amount loan) (get interest-rate loan))))
+    (+ (get amount loan) (/ interest u100))
+  )
+)
+
+;; Update credit score based on borrowing behavior
+;; Successful repayments build credit; defaults reduce creditworthiness
+(define-private (update-credit-score
+    (user principal)
+    (success bool)
+    (loan {
+      borrower: principal,
+      amount: uint,
+      collateral: uint,
+      due-height: uint,
+      interest-rate: uint,
+      is-active: bool,
+      is-defaulted: bool,
+      repaid-amount: uint,
+    })
+  )
+  (let (
+      (current-score (unwrap! (map-get? UserScores { user: user }) ERR-UNAUTHORIZED))
+      (new-score (if success
+        (if (<= (+ (get score current-score) u2) MAX-SCORE)
+          (+ (get score current-score) u2)
+          MAX-SCORE
+        )
+        (if (>= (- (get score current-score) u10) MIN-SCORE)
+          (- (get score current-score) u10)
+          MIN-SCORE
+        )
+      ))
+    )
+    (if success
+      (map-set UserScores { user: user }
+        (merge current-score {
+          score: new-score,
+          total-repaid: (+ (get total-repaid current-score) (get amount loan)),
+          loans-repaid: (+ (get loans-repaid current-score) u1),
+          last-update: stacks-block-height,
+        })
+      )
+      (map-set UserScores { user: user }
+        (merge current-score {
+          score: new-score,
+          last-update: stacks-block-height,
+        })
+      )
+    )
+    (ok true)
+  )
+)
+
+;; Manage user loan portfolio
+(define-private (update-user-loans
+    (user principal)
+    (loan-id uint)
+  )
+  (let ((user-loans (default-to { active-loans: (list) } (map-get? UserLoans { user: user }))))
+    (map-set UserLoans { user: user } { active-loans: (unwrap! (as-max-len? (append (get active-loans user-loans) loan-id) u20)
+      ERR-ACTIVE-LOAN
+    ) }
+    )
+    (ok true)
+  )
+)
+
+;; READ-ONLY QUERY FUNCTIONS
+
+;; Retrieve user credit profile and lending history
+(define-read-only (get-user-score (user principal))
+  (map-get? UserScores { user: user })
+)
+
+;; Get comprehensive loan details
+(define-read-only (get-loan (loan-id uint))
+  (map-get? Loans { loan-id: loan-id })
+)
+
+;; View user's active loan portfolio
+(define-read-only (get-user-active-loans (user principal))
+  (map-get? UserLoans { user: user })
+)
