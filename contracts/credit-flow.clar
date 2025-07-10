@@ -300,3 +300,26 @@
 (define-read-only (get-user-active-loans (user principal))
   (map-get? UserLoans { user: user })
 )
+
+;; ADMINISTRATIVE FUNCTIONS
+
+;; Mark overdue loans as defaulted
+;; Triggers automatic credit score penalties and risk management
+(define-public (mark-loan-defaulted (loan-id uint))
+  (let ((loan (unwrap! (map-get? Loans { loan-id: loan-id }) ERR-LOAN-NOT-FOUND)))
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (>= stacks-block-height (get due-height loan)) ERR-NOT-DUE)
+    (asserts! (get is-active loan) ERR-LOAN-NOT-FOUND)
+    (asserts! (<= loan-id (var-get next-loan-id)) ERR-INVALID-LOAN-ID)
+    ;; Update loan status to defaulted
+    (map-set Loans { loan-id: loan-id }
+      (merge loan {
+        is-defaulted: true,
+        is-active: false,
+      })
+    )
+    ;; Apply credit score penalty
+    (try! (update-credit-score (get borrower loan) false loan))
+    (ok true)
+  )
+)
