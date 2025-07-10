@@ -92,3 +92,107 @@
     }))
   )
 )
+
+;; Request new loan with intelligent risk assessment
+;; Dynamically calculates collateral requirements based on creditworthiness
+(define-public (request-loan
+    (amount uint)
+    (collateral uint)
+    (duration uint)
+  )
+  (let (
+      (sender tx-sender)
+      (loan-id (+ (var-get next-loan-id) u1))
+      (user-score (unwrap! (map-get? UserScores { user: sender }) ERR-UNAUTHORIZED))
+      (active-loans (default-to { active-loans: (list) } (map-get? UserLoans { user: sender })))
+    )
+    ;; Validate borrower eligibility and loan parameters
+    (asserts! (>= (get score user-score) MIN-LOAN-SCORE) ERR-INSUFFICIENT-SCORE)
+    (asserts! (<= (len (get active-loans active-loans)) u5) ERR-ACTIVE-LOAN)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (and (> duration u0) (<= duration u52560)) ERR-INVALID-DURATION)
+    ;; Max ~1 year
+    ;; Calculate personalized collateral requirements
+    (let ((required-collateral (calculate-required-collateral amount (get score user-score))))
+      (asserts! (>= collateral required-collateral) ERR-INSUFFICIENT-BALANCE)
+      ;; Secure collateral in escrow
+      (try! (stx-transfer? collateral sender (as-contract tx-sender)))
+      ;; Create loan record with personalized terms
+      (map-set Loans { loan-id: loan-id } {
+        borrower: sender,
+        amount: amount,
+        collateral: collateral,
+        due-height: (+ stacks-block-height duration),
+        interest-rate: (calculate-interest-rate (get score user-score)),
+        is-active: true,
+        is-defaulted: false,
+        repaid-amount: u0,
+      })
+      ;; Update user's loan portfolio
+      (try! (update-user-loans sender loan-id))
+      ;; Disburse loan funds
+      (as-contract (try! (stx-transfer? amount tx-sender sender)))
+      ;; Update protocol state
+      (var-set next-loan-id loan-id)
+      (var-set total-stx-locked (+ (var-get total-stx-locked) collateral))
+      (ok loan-id)
+    )
+  )
+)
+
+;; Process loan repayment with credit score updates
+;; Supports partial payments and automatic credit score enhancement
+(define-public (repay-loan
+    (loan-id uint)
+    (amount uint)
+  )
+  (let (
+      (sender tx-sender)
+      (loan (unwrap! (map-get? Loans { loan-id: loan-id }) ERR-LOAN-NOT-FOUND))
+    )
+    (asserts! (is-eq sender (get borrower loan)) ERR-UNAUTHORIZED)
+    (asserts! (get is-active loan) ERR-LOAN-NOT-FOUND)
+    (asserts! (not (get is-defaulted loan)) ERR-LOAN-DEFAULTED)
+    (asserts! (<= loan-id (var-get next-loan-id)) ERR-INVALID-LOAN-ID)
+    ;; Calculate total obligation including interest
+    (let ((total-due (calculate-total-due loan)))
+      (asserts! (>= amount u0) ERR-INVALID-AMOUNT)
+      ;; Process payment
+      (try! (stx-transfer? amount sender (as-contract tx-sender)))
+      ;; Update loan repayment status
+      (let ((new-repaid-amount (+ (get repaid-amount loan) amount)))
+        (map-set Loans { loan-id: loan-id }
+          (merge loan {
+            repaid-amount: new-repaid-amount,
+            is-active: (< new-repaid-amount total-due),
+          })
+        )
+        ;; Process full repayment rewards
+        (if (>= new-repaid-amount total-due)
+          (begin
+            (try! (update-credit-score sender true loan))
+            (as-contract (try! (stx-transfer? (get collateral loan) tx-sender sender)))
+            (var-set total-stx-locked
+              (- (var-get total-stx-locked) (get collateral loan))
+            )
+          )
+          true
+        )
+        (ok true)
+      )
+    )
+  )
+)
+
+;; PRIVATE CALCULATION FUNCTIONS
+
+;; Calculate adaptive collateral requirements
+;; Premium credit scores unlock reduced collateral ratios
+(define-private (calculate-required-collateral
+    (amount uint)
+    (score uint)
+  )
+  (let ((collateral-ratio (- u100 (/ (* score u50) u100))))
+    (/ (* amount collateral-ratio) u100)
+  )
+)
